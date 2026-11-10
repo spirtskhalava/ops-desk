@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function role() { return request.auth.token.role; }
+    function isStaff() { return signedIn() && role() in ['agent', 'lead']; }
+    function isLead() { return signedIn() && role() == 'lead'; }
+
+    match /tickets/{ticketId} {
+      allow read: if isStaff()
+        || (signedIn() && resource.data.requesterId == request.auth.uid);
+
+      // requesters can open tickets for themselves, nothing else
+      allow create: if signedIn()
+        && request.resource.data.requesterId == request.auth.uid
+        && request.resource.data.status == 'new'
+        && request.resource.data.keys().hasOnly(
+             ['title', 'body', 'requesterId', 'requesterName', 'status',
+              'priority', 'channel', 'createdAt', 'updatedAt']);
+
+      // agents move tickets and assign themselves; SLA fields are server-only
+      allow update: if isStaff()
+        && !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['slaDueAt', 'slaBreached', 'createdAt', 'requesterId'])
+        && (isLead() || request.resource.data.assigneeId in [request.auth.uid, null]);
+
+      allow delete: if isLead();
+
+      match /messages/{messageId} {
+        allow read: if isStaff()
+          || (signedIn() && get(/databases/$(db)/documents/tickets/$(ticketId)).data.requesterId == request.auth.uid);
+        allow create: if signedIn()
+          && request.resource.data.authorId == request.auth.uid
+          && request.resource.data.direction == 'internal';
+      }
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow write: if false; // managed by functions
+    }
+  }
+}
